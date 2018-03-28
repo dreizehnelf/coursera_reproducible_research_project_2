@@ -1,0 +1,367 @@
+# Most harmful storm event types in respect to population health and economic impact.
+### A U.S. National Oceanic and Atmospheric Administration's (NOAA) storm database analysis
+##### Coursera / Reproducible Research / Week 4 / Course Project 2
+##### Michael Hengherr / March 28th, 2018
+
+## Synopsis
+
+This analysis aims to answer the following questions:
+
+  1. Across the United States, which types of events (as indicated in the `EVTYPE` variable) are most harmful with respect to population health?
+  2. Across the United States, which types of events have the greatest economic consequences?
+
+As base for our analysis, we will be using the dataset available from `https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2` together with its documentation from `https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2Fpd01016005curr.pdf` and a brief FAQ available from `https://d396qusza40orc.cloudfront.net/repdata%2Fpeer2_doc%2FNCDC%20Storm%20Events-FAQ%20Page.pdf`.
+
+The events in the database start in the year 1950 and end in November 2011. They describe the occurrences of major weather events together with associated effects.
+
+After cleaning and analyzing the data, we can answer the original questions with the following findings:
+
+  1. The most harmful events in respect to population health are Tornados, causing close to 100K (thousand) incidents (injuries+fatalities), followed by excessive heat, thunderstorms and floods - all around 10-12.5K incidents.
+  2. The most harmful events in respect to economic consequences are Floods, causing over 175B (billion) USD in damages (property+crop), followed by Hurricanes (~90B), Storms/Winds (~80B) and Tornados (60B).
+
+## Data Acquisition
+
+Download the dataset, if not available locally at `data.csv.bz2`.
+
+```{r, echo=TRUE}
+DATA_URL <- "https://d396qusza40orc.cloudfront.net/repdata%2Fdata%2FStormData.csv.bz2"
+DATA_LOCAL_FILE <- "data.csv.bz2"
+
+# download the data file, if it is not present
+if(!file.exists(DATA_LOCAL_FILE)) {
+  download.file(
+    DATA_URL,
+    DATA_LOCAL_FILE
+  )
+}
+
+# load the data (read.csv can handle .bz2, so no decompression step needed)
+# we want to keep the header row and don't want to convert string values to factors
+storm_data <- read.csv(
+  DATA_LOCAL_FILE,
+  header = TRUE, 
+  stringsAsFactors = FALSE
+)
+```
+
+After looking at the documentation, it seems we can ignore most of the columns and only have to keep the following:
+
+  1. `EVTYPE`: The event type, we want to group by
+  2. `FATALITIES`: Fatality count
+  3. `INJURIES`: Injury count
+  4. `PROPDMG`: Base component of the estimated property damage
+  5. `PROPDMGEXP`: Exponent indicator of the estimated property damage (i.e. 'M' for Millions etc.)
+  6. `CROPDMG`: Base componente of the estimated crop damage
+  7. `CROPDMGEXP`: : Exponent indicator of the estimated crop damage (i.e. 'M' for Millions etc.)
+
+```{r, echo=TRUE}
+library(dplyr)
+
+storm_data <- storm_data %>%
+  select(EVTYPE, FATALITIES, INJURIES, PROPDMG, PROPDMGEXP, CROPDMG, CROPDMGEXP)
+```
+
+## Data Processing
+
+Since the dataset contains a relatively small number of observations with `PROPDMGEXP` and `CROPDMGEXP` values that could not properly be assessed based on the documentation, those observations will be removed from our analysis. Known values for `PROPDMGEXP` and `CROPDMGEXP` are the following:
+
+  1. `H`: hekto = 10^2
+  2. `K`: kilo = 10^3
+  3. `M`: million = 10^6
+  4. `B`: billion = 10^9
+
+The whole list of used values is a lot longer:
+
+```{r, echo=TRUE}
+unique(storm_data$PROPDMGEXP)
+```
+
+```{r, echo=TRUE}
+unique(storm_data$CROPDMGEXP)
+```
+
+First of all, we have a mix of lower- and uppercase values for our valid values. Let's fix that.
+
+```{r, echo=TRUE}
+
+storm_data <- storm_data %>%
+  mutate(
+    PROPDMGEXP=toupper(PROPDMGEXP),
+    CROPDMGEXP=toupper(CROPDMGEXP)
+  )
+```
+
+Now we want to know how many observations have unknown exponent values, if the base value is not 0 (if it is, the exponent doesn't play any role and even unknown values will not screw up the analysis). So let's define some logical vectors to pull that information.
+
+```{r, echo=TRUE}
+
+VALID_EXP_VALUES = c('H', 'K', 'M', 'B')
+
+# logical vector indicating whether this observation has problematic
+# property damage exponent value
+PROPDMG_OBSERVATIONS_TO_IGNORE <- storm_data$PROPDMG!=0 &
+    !(storm_data$PROPDMGEXP %in% VALID_EXP_VALUES)
+
+# logical vector indicating whether this observation has problematic
+# crop damage exponent value
+CROPDMG_OBSERVATIONS_TO_IGNORE <- storm_data$CROPDMG!=0 &
+    !(storm_data$CROPDMGEXP %in% VALID_EXP_VALUES)
+
+```
+**Property Damage**
+
+```{r, echo=TRUE}
+# Propery damage
+nrow(
+  storm_data[PROPDMG_OBSERVATIONS_TO_IGNORE,]
+)
+```
+
+**Crop Damage**
+
+```{r, echo=TRUE}
+# Crop damage
+nrow(
+  storm_data[CROPDMG_OBSERVATIONS_TO_IGNORE,]
+)
+```
+
+**Total observations**
+```{r, echo=TRUE}
+nrow(storm_data)
+```
+
+We have verified, that those unknown observations can safely be ignored, since they represent only a very small fraction of the whole dataset.
+Our dataset can be updated by filtering based on our logical vectors.
+
+
+```{r, echo=TRUE}
+
+storm_data <- storm_data %>%
+    filter(
+        !(PROPDMG_OBSERVATIONS_TO_IGNORE |
+        CROPDMG_OBSERVATIONS_TO_IGNORE)
+    )
+
+nrow(storm_data)
+```
+
+The total number of observations has been properly reduced by the ones we did not know how to properly process.
+Now we can run the proper calculations to assess the damage values and store the result in two new variables `PROPDMG_FULL` and `CROPDMG_FULL`.
+We still need to account for unknown exponent values, since due to the fact that we only dropped the observations that have unknown
+exponent values **and** a damage value other than 0, we still have quite a lot of observations with damage values of 0 and unknown exponent values.
+
+
+```{r, echo=TRUE}
+
+# get the multiplier for a single exponent value
+get_multiplier <- function(exponent) {
+
+    # if we know the exponent value, return the proper multiplier
+    if(exponent %in% VALID_EXP_VALUES) {
+        return(
+            switch(
+                exponent,
+                H=10^2,
+                K=10^3,
+                M=10^6,
+                B=10^9
+            )
+        )
+    } else {
+        return(1)
+    }
+}
+
+# provide a variant of get_multiplier that accepts a whole column
+get_multipliers <- function(exponents) {
+  return(sapply(exponents, get_multiplier))
+}
+
+# calculate the full damage value based on the base value and the exponent
+storm_data <- storm_data %>%
+    mutate(
+        PROPDMG_FULL=PROPDMG*get_multipliers(PROPDMGEXP),
+        CROPDMG_FULL=CROPDMG*get_multipliers(CROPDMGEXP)
+    )
+
+```
+
+**Injuries & Fatalities**
+
+There could be multiple ways of comparing injuries to fatalities to properly
+assess the impact of the event - but since there is no sensible ratio of weights that would
+relate an injury to a death, for now we'll simply use a count (both an injury and a death
+will have the same weight).
+
+**Full impact scores**
+
+```{r, echo=TRUE}
+storm_data <- storm_data %>%
+    mutate(
+        ECONOMIC_IMPACT=PROPDMG_FULL+CROPDMG_FULL,
+        HEALTH_IMPACT=INJURIES+FATALITIES
+    )
+
+```
+
+**Grouping by Event Type**
+
+Upon inspection the values of the `EVTYPE` variable shows to be unnormalized and unclean.
+The values contain a mix of upper- and lowercase as well as inconsistent whitespacing. There is also
+a mix of singular and plural denominations and different formulations of the same categories.
+
+```{r, echo=TRUE}
+head(unique(storm_data$EVTYPE), 100)
+```
+
+There is no easy solution to properly fix all those problems, but I've tried to spot the most prevalent
+associations and fix the casing and whitespace problems.
+
+```{r, echo=TRUE}
+
+# R seems to have some pretty nasty handling of boolean comparisons, which can lead to strange errors.
+# So this function will do the heavy lifting of catching edge cases. For further infos/discussion, see
+# https://stackoverflow.com/questions/27350636/r-argument-is-of-length-zero-in-if-statement
+grep_match <- function(pattern, subject) {
+
+    if(!is.null(subject) & length(subject) > 0) {
+        # grep will return integer(0) if the pattern is not found, so make sure
+        # we convert this to a boolean
+        return(length(grep(pattern, subject)) > 0)
+    } else {
+        return(FALSE)
+    }
+}
+
+clean_evtype <- function(event_type) {
+  
+    # drop whitespace at the beginning and the end
+    trimmed <- trimws(event_type)
+
+    # uppercase everything
+    processed <- toupper(trimmed)
+
+    if(grep_match("THUNDERSTORM|TSTM", processed)) { return("THUNDERSTORM") }
+    else if(grep_match("STORM|WIND", processed)) { return("STORM / WIND") }
+    else if(grep_match("WIDLFIRE|WILD FIRE|FOREST FIRE", processed)) { return("WILDFIRE") }
+    else if(grep_match("TORNADO", processed)) { return("TORNADO") }
+    else if(grep_match("HURRICANE", processed)) { return("HURRICANE") }
+    else if(grep_match("FLOOD", processed)) { return("FLOOD") }
+    else if(grep_match("HAIL", processed)) { return("HAIL") }
+    else if(grep_match("RAIN", processed)) { return("RAIN") }
+    else if(grep_match("SNOW", processed)) { return("SNOW") }
+    else if(grep_match("ICE|FREEZE", processed)) { return("ICE/FREEZING") }
+    else if(grep_match("FOG", processed)) { return("FOG") }
+    else if(grep_match("LIGHTING|LIGHTNING", processed)) { return("LIGHTNING") }
+    else if(grep_match("COLD", processed)) { return("COLD") }
+    else if(grep_match("HEAT|WARMTH", processed)) { return("HEAT") }
+    else if(grep_match("UNSEASONAL", processed)) { return("UNSEASONAL WEATHER/CLIMATE") }
+    else if(grep_match("BLIZZARD", processed)) { return("BLIZZARD") }
+    else { return(processed) }
+
+}
+
+clean_evtypes <- function(event_types) {
+    return(sapply(event_types, clean_evtype))
+}
+
+storm_data <- storm_data %>%
+    mutate(
+        CLEAN_EVTYPE=clean_evtypes(EVTYPE)
+    )
+
+```
+
+Now we only have to have a look at the numbers - so calculate the sums for each event type group.
+
+```{r, echo=TRUE}
+
+# build the dataset grouped by CLEAN_EVTYPE
+event_impacts <- storm_data %>%
+  group_by(CLEAN_EVTYPE) %>%
+  summarise(
+    INJURIES=sum(INJURIES),
+    FATALITIES=sum(FATALITIES),
+    HEALTH_IMPACT=sum(HEALTH_IMPACT),
+    PROPDMG=sum(PROPDMG_FULL),
+    CROPDMG=sum(CROPDMG_FULL),
+    ECONOMIC_IMPACT=sum(ECONOMIC_IMPACT)
+  )
+```
+
+## Results
+
+We will use `tidyr` to transform our data from wide to long format and `ggplot2` to render the figures.
+We'll also divide our impact values down to nicely displayable ranges.
+
+```{r, echo=TRUE}
+library(tidyr)
+library(ggplot2)
+
+```
+
+#### Health Impact
+
+```{r, echo=TRUE}
+
+top_10_health_impacts <- event_impacts %>%
+    select(CLEAN_EVTYPE, INJURIES, FATALITIES, HEALTH_IMPACT) %>%
+    arrange(desc(HEALTH_IMPACT)) %>%
+    top_n(10) %>%
+    gather(CATEGORY, IMPACT, INJURIES, FATALITIES, HEALTH_IMPACT) %>%
+    mutate(
+      CATEGORY=factor(CATEGORY, levels=c("HEALTH_IMPACT", "FATALITIES", "INJURIES")),
+      IMPACT=IMPACT/1000
+    )
+
+ggplot(
+  top_10_health_impacts,
+  aes(
+    x=reorder(CLEAN_EVTYPE, -IMPACT),
+    y=IMPACT,
+    fill=CATEGORY)
+  ) +
+  geom_bar(stat="identity") +
+  facet_grid(. ~ CATEGORY) +
+  ylab("Health Impact (in 1000 incidents)") +
+  xlab("Event type group") +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) +
+  labs(
+      title="Top 10 storm events groups in the US based on health impact",
+      subtitle="(measured as injury+fatality incidents)"
+  )
+```
+
+
+#### Economic Impact
+
+```{r, echo=TRUE}
+
+top_10_economic_impacts <- event_impacts %>%
+    select(CLEAN_EVTYPE, PROPDMG, CROPDMG, ECONOMIC_IMPACT) %>%
+    arrange(desc(ECONOMIC_IMPACT)) %>%
+    top_n(10) %>%
+    gather(CATEGORY, IMPACT, PROPDMG, CROPDMG, ECONOMIC_IMPACT) %>%
+    mutate(
+      CATEGORY=factor(CATEGORY, levels=c("ECONOMIC_IMPACT", "PROPDMG", "CROPDMG")),
+      IMPACT=IMPACT/(10^9)
+    )
+
+ggplot(
+  top_10_economic_impacts,
+  aes(
+    x=reorder(CLEAN_EVTYPE, -IMPACT),
+    y=IMPACT,
+    fill=CATEGORY)
+  ) +
+  geom_bar(stat="identity") +
+  facet_grid(. ~ CATEGORY) +
+  ylab("Economic Impact (in billion USD)") +
+  xlab("Event type group") +
+  theme(axis.text.x=element_text(angle = -90, hjust = 0)) +
+  labs(
+      title="Top 10 storm events groups in the US based on economic impact",
+      subtitle="(measured as property+crop damage)"
+  )
+```
